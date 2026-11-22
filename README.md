@@ -12,10 +12,10 @@ No macOS, instale também o [Homebrew](https://brew.sh/); por exemplo:
 brew install go-task
 ```
 
-A tarefa `check` instala Helm, kubectl, kind e k9s via Homebrew quando necessário.
-No Windows, instale Helm, kubectl, kind e k9s previamente e confira se essas
-ferramentas estão no PATH. A tarefa verifica o Docker, mas não o instala
-nem o inicia.
+A tarefa `check` instala Helm, kubectl, kind e k9s quando necessário: usa
+Homebrew no macOS e Linux, e [winget](https://learn.microsoft.com/windows/package-manager/winget/)
+no Windows. O gerenciador correspondente deve estar instalado. A tarefa verifica
+o Docker, mas não o instala nem o inicia.
 
 ## Executar
 

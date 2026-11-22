@@ -8,6 +8,9 @@ vars:
   DOCKERHUB_USER: '{{.DOCKERHUB_USER | default "kaufirs"}}'
   SPARK_IMAGE_REPO: 'docker.io/{{.DOCKERHUB_USER}}/spark-poc'
 
+env:
+  PATH: '{{if eq OS "windows"}}{{env "PATH"}};{{env "LOCALAPPDATA"}}\Microsoft\WinGet\Links{{else}}{{env "PATH"}}{{end}}'
+
 tasks:
   default:
     desc: Lista os comandos disponíveis
@@ -58,9 +61,10 @@ tasks:
     internal: true
     vars:
       PACKAGE: '{{if eq .TOOL "kubectl"}}kubernetes-cli{{else}}{{.TOOL}}{{end}}'
+      WINGET_PACKAGE: '{{if eq .TOOL "helm"}}Helm.Helm{{else if eq .TOOL "kubectl"}}Kubernetes.kubectl{{else if eq .TOOL "kind"}}Kubernetes.kind{{else}}Derailed.k9s{{end}}'
     cmds:
       - task: check:install
-        vars: {TOOL: '{{.TOOL}}', PACKAGE: '{{.PACKAGE}}'}
+        vars: {TOOL: '{{.TOOL}}', PACKAGE: '{{.PACKAGE}}', WINGET_PACKAGE: '{{.WINGET_PACKAGE}}'}
       - 'command -v {{.TOOL}} >/dev/null || { echo "[erro] {{.TOOL}} não está disponível no PATH." >&2; exit 1; }'
       - 'echo "[ok] {{.TOOL}}: $(command -v {{.TOOL}})"'
 
@@ -69,9 +73,9 @@ tasks:
     status:
       - command -v {{.TOOL}}
     cmds:
-      - 'command -v brew >/dev/null || { echo "[erro] {{.TOOL}} não encontrado. Instale a ferramenta e tente novamente." >&2; exit 1; }'
-      - 'echo "[check] Instalando {{.TOOL}} via Homebrew..."'
-      - 'brew install {{.PACKAGE}}'
+      - '{{if eq OS "windows"}}command -v winget >/dev/null || { echo "[erro] Instale o winget para instalar {{.TOOL}}." >&2; exit 1; }{{else}}command -v brew >/dev/null || { echo "[erro] Instale o Homebrew para instalar {{.TOOL}}." >&2; exit 1; }{{end}}'
+      - 'echo "[check] Instalando {{.TOOL}}..."'
+      - '{{if eq OS "windows"}}winget install --id {{.WINGET_PACKAGE}} --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity{{else}}brew install {{.PACKAGE}}{{end}}'
 
   cluster:
     desc: Cria o cluster kind
@@ -81,32 +85,17 @@ tasks:
 
   cluster:create:
     internal: true
+    vars:
+      CONFIG: '{{if eq OS "windows"}}{{env "TEMP"}}/spark-poc-kind-config.yaml{{else}}infra/cluster-config.yaml{{end}}'
     status:
       - 'for cluster in $(kind get clusters); do [ "$cluster" = "{{.CLUSTER_NAME}}" ] && exit 0; done; exit 1'
     cmds:
       - echo '[cluster] Criando cluster {{.CLUSTER_NAME}}...'
-      - task: cluster:create:{{OS}}
-
-  cluster:create:darwin:
-    internal: true
-    cmds:
-      - mkdir -p /tmp/spark-poc-event-logs
-      - chmod 777 /tmp/spark-poc-event-logs
-      - kind create cluster --name '{{.CLUSTER_NAME}}' --config infra/cluster-config.yaml
-
-  cluster:create:linux:
-    internal: true
-    cmds:
-      - task: cluster:create:darwin
-
-  cluster:create:windows:
-    internal: true
-    cmds:
       - >-
-        powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "spark-poc-event-logs") | Out-Null'
+        {{if eq OS "windows"}}powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "spark-poc-event-logs") | Out-Null'{{else}}mkdir -p /tmp/spark-poc-event-logs{{end}}
       - >-
-        powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; (Get-Content -Raw "infra/cluster-config.yaml").Replace("/tmp/spark-poc-event-logs", (($env:TEMP + "/spark-poc-event-logs") -replace "\\", "/")) | Set-Content -Encoding utf8 (Join-Path $env:TEMP "spark-poc-kind-config.yaml")'
-      - 'kind create cluster --name "{{.CLUSTER_NAME}}" --config "$TEMP/spark-poc-kind-config.yaml"'
+        {{if eq OS "windows"}}powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; (Get-Content -Raw "infra/cluster-config.yaml").Replace("/tmp/spark-poc-event-logs", (($env:TEMP + "/spark-poc-event-logs") -replace "\\", "/")) | Set-Content -Encoding utf8 (Join-Path $env:TEMP "spark-poc-kind-config.yaml")'{{else}}chmod 777 /tmp/spark-poc-event-logs{{end}}
+      - kind create cluster --name '{{.CLUSTER_NAME}}' --config '{{.CONFIG}}'
 
   operator:
     desc: Instala o Spark Operator
