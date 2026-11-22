@@ -1,0 +1,177 @@
+version: '3'
+
+vars:
+  CLUSTER_NAME: '{{.CLUSTER_NAME | default "spark-poc"}}'
+  KUBE_CONTEXT: 'kind-{{.CLUSTER_NAME}}'
+  DOCKERHUB_USER: '{{.DOCKERHUB_USER | default "kaufirs"}}'
+  SPARK_IMAGE_REPO: 'docker.io/{{.DOCKERHUB_USER}}/spark-poc'
+
+tasks:
+  default:
+    desc: Lista os comandos disponíveis
+    cmds:
+      - task --list
+
+  images:build:
+    desc: Constrói localmente as imagens base, pi e contagem
+    requires:
+      vars: [DOCKERHUB_USER]
+    cmds:
+      - docker build -f images/Dockerfile.base -t '{{.SPARK_IMAGE_REPO}}:base-3.5.3' .
+      - docker build -f images/Dockerfile.pi --build-arg 'BASE_IMAGE={{.SPARK_IMAGE_REPO}}:base-3.5.3' -t '{{.SPARK_IMAGE_REPO}}:pi-3.5.3' .
+      - docker build -f images/Dockerfile.contagem --build-arg 'BASE_IMAGE={{.SPARK_IMAGE_REPO}}:base-3.5.3' -t '{{.SPARK_IMAGE_REPO}}:contagem-3.5.3' .
+
+  images:push:
+    desc: Publica as três imagens no Docker Hub
+    requires:
+      vars: [DOCKERHUB_USER]
+    cmds:
+      - docker push '{{.SPARK_IMAGE_REPO}}:base-3.5.3'
+      - docker push '{{.SPARK_IMAGE_REPO}}:pi-3.5.3'
+      - docker push '{{.SPARK_IMAGE_REPO}}:contagem-3.5.3'
+
+  dockerhub:secret:
+    desc: Cria ou atualiza o Secret de acesso ao Docker Hub
+    silent: true
+    env:
+      DOCKERHUB_USER: '{{.DOCKERHUB_USER}}'
+    cmds:
+      - |
+        set -eu
+        set -o pipefail
+        if [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+          printf '\033[1;31m[erro] Defina DOCKERHUB_TOKEN no ambiente.\033[0m\n' >&2
+          exit 1
+        fi
+        printf '\033[1;36m[secret] Aplicando credenciais do Docker Hub...\033[0m\n'
+        python3 -c 'import base64, json, os, pathlib; user = os.environ["DOCKERHUB_USER"]; token = os.environ["DOCKERHUB_TOKEN"]; auth = base64.b64encode((user + ":" + token).encode()).decode(); config = json.dumps({"auths": {"https://index.docker.io/v1/": {"auth": auth}}}); encoded = base64.b64encode(config.encode()).decode(); print(pathlib.Path("infra/dockerhub-secret.yaml").read_text().replace("${DOCKER_CONFIG_BASE64}", encoded))' | kubectl --context '{{.KUBE_CONTEXT}}' apply -f -
+
+  check:
+    desc: Garante Helm, kubectl, kind e k9s e verifica o Docker
+    cmds:
+      - |
+        set -e
+        printf '\033[1;36m[check] Verificando ferramentas e Docker...\033[0m\n'
+        for tool in helm kubectl kind k9s; do
+          if ! command -v "$tool" >/dev/null 2>&1; then
+            if ! command -v brew >/dev/null 2>&1; then
+              printf '\033[1;31m[erro] %s não encontrado e Homebrew indisponível. Instale o Homebrew ou a ferramenta e tente novamente.\033[0m\n' "$tool" >&2
+              exit 1
+            fi
+            printf '\033[1;36m[check] Instalando %s via Homebrew...\033[0m\n' "$tool"
+            case "$tool" in
+              kubectl) brew install kubernetes-cli ;;
+              *) brew install "$tool" ;;
+            esac
+          fi
+          if ! command -v "$tool" >/dev/null 2>&1; then
+            printf '\033[1;31m[erro] %s ainda não está disponível no PATH após a instalação.\033[0m\n' "$tool" >&2
+            exit 1
+          fi
+          printf '\033[1;32m[ok]\033[0m %s: %s\n' "$tool" "$(command -v "$tool")"
+        done
+        if ! command -v docker >/dev/null 2>&1; then
+          printf '\033[1;31m[erro] Docker não está instalado ou não está no PATH.\033[0m\n' >&2
+          exit 1
+        fi
+        docker info >/dev/null || { printf '\033[1;31m[erro] Docker indisponível.\033[0m\n' >&2; exit 1; }
+        printf '\033[1;32m[ok] Docker disponível.\033[0m\n'
+
+  cluster:
+    desc: Cria o cluster kind
+    cmds:
+      - task: check
+      - |
+        set -e
+        clusters=$(kind get clusters)
+        if printf '%s\n' "$clusters" | grep -Fxq -- '{{.CLUSTER_NAME}}'; then
+          printf '\033[1;33m[cluster] Cluster {{.CLUSTER_NAME}} já existe.\033[0m\n'
+        else
+          printf '\033[1;36m[cluster] Criando cluster {{.CLUSTER_NAME}}...\033[0m\n'
+          mkdir -p /tmp/spark-poc-event-logs
+          chmod 777 /tmp/spark-poc-event-logs
+          kind create cluster --name '{{.CLUSTER_NAME}}' --config infra/cluster-config.yaml
+        fi
+
+  operator:
+    desc: Instala o Spark Operator
+    cmds:
+      - task: check
+      - |
+        printf '\033[1;36m[namespace] Aplicando namespace spark-jobs...\033[0m\n'
+        kubectl --context '{{.KUBE_CONTEXT}}' apply -f infra/spark-jobs-namespace.yaml
+      - |
+        set -e
+        printf '\033[1;36m[helm] Configurando repositório oficial...\033[0m\n'
+        helm repo add spark-operator https://kubeflow.github.io/spark-operator --force-update
+        helm repo update spark-operator
+        printf '\033[1;36m[operator] Instalando chart 2.6.0...\033[0m\n'
+        helm upgrade --install spark-operator spark-operator/spark-operator \
+          --version 2.6.0 --kube-context '{{.KUBE_CONTEXT}}' \
+          --namespace spark-operator --create-namespace \
+          --set 'spark.jobNamespaces[0]=spark-jobs' --wait --timeout 5m
+      - |
+        set -e
+        printf '\033[1;36m[operator] Aguardando controller e webhook...\033[0m\n'
+        kubectl --context '{{.KUBE_CONTEXT}}' -n spark-operator rollout status deployment/spark-operator-controller --timeout=5m
+        kubectl --context '{{.KUBE_CONTEXT}}' -n spark-operator rollout status deployment/spark-operator-webhook --timeout=5m
+
+  history:
+    desc: Instala o Spark History Server
+    cmds:
+      - |
+        set -e
+        nodes=$(kubectl --context '{{.KUBE_CONTEXT}}' get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[*].metadata.name}')
+        if [ -z "$nodes" ]; then
+          printf '\033[1;31m[erro] Nenhum nó worker encontrado no cluster.\033[0m\n' >&2
+          exit 1
+        fi
+        for node in $nodes; do
+          if ! docker exec "$node" sh -c 'grep -q " /spark-event-logs " /proc/mounts'; then
+            printf '\033[1;31m[erro] O nó %s não possui o diretório de event logs. Recrie o cluster com a configuração atual.\033[0m\n' "$node" >&2
+            exit 1
+          fi
+        done
+        printf '\033[1;36m[history] Instalando Spark History Server...\033[0m\n'
+        kubectl --context '{{.KUBE_CONTEXT}}' apply -f infra/spark-history-server.yaml
+        kubectl --context '{{.KUBE_CONTEXT}}' -n spark-jobs rollout status deployment/spark-history-server --timeout=5m
+
+  history-ui:
+    desc: Disponibiliza o History Server em localhost:18080
+    cmds:
+      - |
+        printf '\033[1;36m[history] Acesse http://localhost:18080 (Ctrl+C para sair).\033[0m\n'
+        kubectl --context '{{.KUBE_CONTEXT}}' -n spark-jobs port-forward service/spark-history-server 18080:18080
+
+  job:
+    desc: Envia o job Spark Pi
+    cmds:
+      - |
+        printf '\033[1;36m[job] Aplicando SparkApplication...\033[0m\n'
+        kubectl --context '{{.KUBE_CONTEXT}}' apply -f spark-jobs/pi.yaml
+      - task: status
+
+  status:
+    desc: Mostra o estado do operador e dos jobs
+    cmds:
+      - |
+        set -e
+        printf '\033[1;36m[status] Operador\033[0m\n'
+        kubectl --context '{{.KUBE_CONTEXT}}' -n spark-operator get deployments,pods
+        printf '\033[1;36m[status] SparkApplications e pods\033[0m\n'
+        kubectl --context '{{.KUBE_CONTEXT}}' -n spark-jobs get sparkapplications,pods
+
+  logs:
+    desc: Acompanha os logs do controller
+    cmds:
+      - |
+        printf '\033[1;36m[logs] Acompanhando o controller (Ctrl+C para sair)...\033[0m\n'
+        kubectl --context '{{.KUBE_CONTEXT}}' -n spark-operator logs -f deployment/spark-operator-controller
+
+  up:
+    desc: Cria o cluster, instala o operador e envia o exemplo
+    cmds:
+      - task: cluster
+      - task: operator
+      - task: history
+      - task: job

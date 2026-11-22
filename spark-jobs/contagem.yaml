@@ -1,0 +1,45 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: contagem-distribuida
+  namespace: spark-jobs
+spec:
+  type: Python
+  mode: cluster
+  image: "docker.io/kaufirs/spark-poc:contagem-3.5.3"
+  imagePullPolicy: Always
+  imagePullSecrets:
+    - dockerhub-credentials
+  mainApplicationFile: local:///opt/spark/jobs/contagem.py
+  sparkVersion: "3.5.3"
+  sparkConf:
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: "file:///spark-event-logs"
+  volumes:
+    - name: event-logs
+      hostPath:
+        path: /spark-event-logs
+        type: Directory
+  restartPolicy:
+    type: Never
+  dynamicAllocation:
+    enabled: true
+    initialExecutors: 1
+    minExecutors: 1
+    maxExecutors: 4
+    shuffleTrackingEnabled: true
+  driver:
+    cores: 1
+    coreLimit: "1200m"
+    memory: "1g"
+    labels:
+      version: 3.5.3
+    serviceAccount: spark-operator-spark
+    volumeMounts:
+      - name: event-logs
+        mountPath: /spark-event-logs
+  executor:
+    cores: 1
+    memory: "1g"
+    labels:
+      version: 3.5.3

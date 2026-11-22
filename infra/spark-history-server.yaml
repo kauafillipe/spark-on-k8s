@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-history-server
+  namespace: spark-jobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-history-server
+  template:
+    metadata:
+      labels:
+        app: spark-history-server
+    spec:
+      containers:
+        - name: history-server
+          image: apache/spark:3.5.3-python3
+          command: ["/opt/spark/bin/spark-class"]
+          args: ["org.apache.spark.deploy.history.HistoryServer"]
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: "-Dspark.history.fs.logDirectory=file:///spark-event-logs -Dspark.history.fs.update.interval=5s"
+          ports:
+            - containerPort: 18080
+          readinessProbe:
+            tcpSocket:
+              port: 18080
+            periodSeconds: 5
+          volumeMounts:
+            - name: event-logs
+              mountPath: /spark-event-logs
+              readOnly: true
+      volumes:
+        - name: event-logs
+          hostPath:
+            path: /spark-event-logs
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-history-server
+  namespace: spark-jobs
+spec:
+  selector:
+    app: spark-history-server
+  ports:
+    - port: 18080
+      targetPort: 18080
