@@ -4,16 +4,18 @@ O Taskfile instala o Spark Operator 2.6.0 pelo chart Helm oficial e configura as
 
 ## Pré-requisitos
 
-No macOS, instale o [Homebrew](https://brew.sh/) e o Docker Desktop e deixe o
-Docker em execução. Instale o [Task](https://taskfile.dev/docs/installation)
-com o Homebrew:
+Instale o Docker Desktop e o [Task](https://taskfile.dev/docs/installation),
+e deixe o Docker em execução.
+No macOS, instale também o [Homebrew](https://brew.sh/); por exemplo:
 
 ```sh
 brew install go-task
 ```
 
 A tarefa `check` instala Helm, kubectl, kind e k9s via Homebrew quando necessário.
-Ela verifica o Docker, mas não o instala nem o inicia.
+No Windows, instale Helm, kubectl, kind e k9s previamente e confira se essas
+ferramentas estão no PATH. A tarefa verifica o Docker, mas não o instala
+nem o inicia.
 
 ## Executar
 
@@ -42,8 +44,7 @@ task logs
 ```
 
 Use `task up CLUSTER_NAME=outro-nome` para alterar o nome do cluster e passe o
-mesmo parâmetro aos comandos posteriores. As mensagens de etapas usam cores;
-a saída original dos comandos permanece visível.
+mesmo parâmetro aos comandos posteriores. As mensagens indicam cada etapa; a saída original dos comandos permanece visível.
 
 A instalação Helm observa `spark-jobs`. O arquivo `values.yaml` não configura esta instalação.
 
@@ -78,8 +79,18 @@ task dockerhub:secret
 unset DOCKERHUB_TOKEN
 ```
 
-O primeiro comando aguarda o token sem exibi-lo. A tarefa preenche o template
-`infra/dockerhub-secret.yaml` em memória e cria ou atualiza o Secret; não é
+No PowerShell, leia o token de forma oculta e disponibilize-o no ambiente do
+processo:
+
+```powershell
+$token = Read-Host "Token Docker Hub" -AsSecureString
+$env:DOCKERHUB_TOKEN = [System.Net.NetworkCredential]::new("", $token).Password
+task dockerhub:secret
+Remove-Item Env:DOCKERHUB_TOKEN
+Remove-Variable token
+```
+
+A leitura oculta o token no terminal. A tarefa monta o Secret em memória e o cria ou atualiza; não é
 necessário salvar o token no arquivo. Execute `task history` e
 `task job` em seguida, ou use `task up` após criar o Secret. Os manifests usam
 `imagePullPolicy: Always` para que uma tag republicada seja consultada novamente.
@@ -98,8 +109,9 @@ task history-ui
 Acesse <http://localhost:18080> enquanto o comando estiver em execução. Cada
 nova execução com event logging habilitado aparecerá na lista; pode levar alguns
 segundos. O histórico só existe para execuções realizadas depois de ativar os
-event logs e permanece enquanto os arquivos locais forem mantidos. O diretório
-`/tmp` pode ser limpo pelo sistema; não é armazenamento permanente.
+event logs e permanece enquanto os arquivos locais forem mantidos. No Windows, os logs ficam em `spark-poc-event-logs` dentro do diretório temporário
+do usuário (por exemplo, `%TEMP%`). O diretório temporário pode ser limpo pelo
+sistema; não é armazenamento permanente.
 
 Se o cluster `spark-poc` já existia antes dessa configuração, é necessário
 recriá-lo para adicionar os mounts aos nós. Isso apaga os recursos existentes
