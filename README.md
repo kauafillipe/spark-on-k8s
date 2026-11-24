@@ -1,6 +1,31 @@
 # Spark Operator no kind
 
-O Taskfile instala o Spark Operator 2.6.0 pelo chart Helm oficial e configura as permissões para jobs no namespace `spark-jobs`. Não requer Argo CD.
+## Exporter S3 para pasta local
+
+O job adapta `dataflash.exporter.s3`: lê Delta no S3 e grava CSV no computador. A definição do dataset sintético `foundations.staging.study_spark_k8s_exporter` está no repositório `foundations.data.staging`; ela precisa ser implantada e executada na DataFlash antes da exportação. O bucket de origem de produção é `dataflash-gold`. O job local não grava no S3.
+
+A imagem própria usa Spark 3.5.5, Delta 3.2.0, Hadoop AWS 3.3.4, AWS Java SDK 1.12.262 e boto3 1.34.139. `task images:build` usa a CA indicada por `CA_CERT`, se existir. Ela fica instalada na imagem para validar conexões HTTPS também durante a execução.
+
+```sh
+saml2aws login --idp-account flash-data --profile flash-data --force
+export AWS_PROFILE=flash-data
+task cluster
+task operator
+task images:build
+task images:push
+task aws:secret
+task job:exporter-s3
+kubectl --context kind-spark-poc -n spark-jobs get sparkapplications,pods
+kubectl --context kind-spark-poc -n spark-jobs logs -f exporter-s3-local-driver
+```
+
+O job consulta a tabela DynamoDB `dataflash_export_s3` para obter o formato e a plataforma, como o original. É necessário que exista uma configuração para `foundations.staging.study_spark_k8s_exporter`. Para CSV, o resultado estará em `/tmp/spark-poc-output/<platform>/foundations/staging/study_spark_k8s_exporter/study_spark_k8s_exporter.csv`. Para outro dataset, altere os argumentos em `spark-jobs/exporter-s3.yaml`.
+
+A task `aws:secret` extrai as credenciais temporárias do perfil com AWS CLI e cria o Secret `exporter-s3-aws` no namespace `spark-jobs`, sem salvá-las no repositório. Atualize o login e o Secret antes de cada submissão: credenciais já passadas aos pods não são renovadas automaticamente. Após o término, remova o Secret se não for mais necessário. Para executar novamente, remova antes a SparkApplication concluída: `kubectl --context kind-spark-poc -n spark-jobs delete sparkapplication exporter-s3-local`.
+
+O diretório de saída é montado nos dois workers via `extraMounts`. Se o cluster já existia antes da alteração, será necessário recriá-lo para disponibilizar esse bind; isso apaga os recursos Kubernetes do cluster. No Windows, os arquivos ficam em `spark-poc-output` no diretório temporário do usuário. O arquivo CSV é substituído se o mesmo dataset for exportado novamente.
+
+O Taskfile instala o Spark Operator 2.6.0 pelo chart Helm oficial. O arquivo `infra/spark-operator-values.yaml` configura o namespace de jobs `spark-jobs` e duas réplicas para cada um dos componentes controller e webhook. Não requer Argo CD.
 
 ## Pré-requisitos
 
@@ -35,6 +60,7 @@ envia o exemplo. Para executar etapas individuais:
 task --list
 task check
 task cluster
+task images:load
 task operator
 task history
 task history-ui
@@ -43,16 +69,28 @@ task status
 task logs
 ```
 
+Para excluir o cluster e todos os recursos nele, execute `task cluster:delete`.
+Os event logs no diretório local do computador são preservados. Para excluir um
+cluster com outro nome, passe `CLUSTER_NAME=outro-nome`.
+
 Use `task up CLUSTER_NAME=outro-nome` para alterar o nome do cluster e passe o
 mesmo parâmetro aos comandos posteriores. As mensagens indicam cada etapa; a saída original dos comandos permanece visível.
+
+Ao criar ou reutilizar o cluster, `task cluster` instala nos workers a CA pública
+configurada em `CA_CERT`, caso o arquivo exista, e reinicia o containerd nesses
+nós. O caminho padrão é o certificado Cloudflare exportado em Downloads neste
+ambiente. Para outro caminho, use `task cluster CA_CERT="/caminho/para/ca.pem"`.
+O arquivo deve conter um certificado PEM confiável. Se não existir, a etapa é
+ignorada. A instalação também pode ser executada separadamente com `task cluster:ca`.
 
 A instalação Helm observa `spark-jobs`. O arquivo `values.yaml` não configura esta instalação.
 
 ## Imagens privadas dos jobs
 
-Os Dockerfiles em `images/` usam Spark 3.5.3: a imagem base deriva da imagem
-oficial Python; a imagem do Pi usa o exemplo já presente na base; e a de
-contagem acrescenta `spark-jobs/contagem.py`. As três tags são publicadas no
+As imagens do Pi e da contagem usam a base oficial Python Spark 3.5.3; a de
+contagem acrescenta `spark-jobs/contagem.py`. A imagem do exporter deriva de
+`Dockerfile.base-exporter`, baseada na imagem oficial Python Spark 3.5.5, e inclui o job e suas dependências, para testar
+uma versão diferente. As tags são publicadas no
 mesmo repositório `kaufirs/spark-poc`.
 
 Crie o repositório `spark-poc` como **privado** no Docker Hub e autentique o
@@ -66,7 +104,7 @@ task images:push
 
 O build local e a publicação são etapas separadas; `task up` não as executa.
 Para usar outro usuário, passe `DOCKERHUB_USER=outro-usuario` às duas tarefas e
-altere o campo `image` nos dois arquivos em `spark-jobs/`.
+altere o campo `image` nos manifestos correspondentes em `spark-jobs/`.
 
 Para permitir que o kind baixe imagens privadas, crie o Secret no namespace
 `spark-jobs` depois de executar `task cluster` e `task operator`. Use uma senha
@@ -118,28 +156,56 @@ recriá-lo para adicionar os mounts aos nós. Isso apaga os recursos existentes
 no cluster; os event logs no diretório do computador são mantidos:
 
 ```sh
-kind delete cluster --name spark-poc
+task cluster:delete
 task up
 ```
 
 Ao recriar o cluster, gere novamente o kubeconfig do MWAA descrito abaixo.
 Se os nós kind não conseguirem baixar imagens por erro de certificado, é
-possível baixá-las pelo Docker e carregá-las no cluster antes de repetir
-`task up`:
+possível baixar a imagem do operador pelo Docker e carregá-la nos workers antes
+de executar `task operator` ou repetir `task up`:
 
 ```sh
-docker pull ghcr.io/kubeflow/spark-operator/controller:2.6.0
+task cluster
+task images:load
+```
+
+Para carregar também a imagem usada pelo History Server:
+
+```sh
 docker pull apache/spark:3.5.3-python3
-kind load docker-image --name spark-poc ghcr.io/kubeflow/spark-operator/controller:2.6.0 apache/spark:3.5.3-python3
+kind load docker-image --name spark-poc apache/spark:3.5.3-python3
 ```
 
 Esse procedimento depende de o Docker conseguir acessar os registros e pode
-levar alguns minutos para copiar as imagens aos nós.
+levar alguns minutos para copiar as imagens aos nós. A task carrega a imagem do
+operador apenas nos workers; se o operador for configurado para executar no
+control plane, a imagem também precisará estar disponível nele. Para outro cluster, passe
+`CLUSTER_NAME=outro-nome` à task e use o mesmo nome no comando `kind load`.
 
 ## DAGs no MWAA local
 
-As DAGs `spark_pi_kind` e `spark_contagem_kind` são disparadas manualmente no
-Airflow. Com o cluster kind criado, prepare o kubeconfig para o container do
+Os workers kind usam labels de teste `tier=standard` e
+`tier=optimized`. Os jobs pi e exporter selecionam `standard`; pi com
+TTL e contagem selecionam `optimized`. Os tiers testam apenas o posicionamento,
+pois os workers compartilham os recursos da máquina local. Em um cluster já
+existente, aplique as labels sem recriá-lo (confirme os nomes com `kubectl get
+nodes`):
+
+```sh
+kubectl --context kind-spark-poc label node spark-poc-worker tier=standard --overwrite
+kubectl --context kind-spark-poc label node spark-poc-worker2 tier=optimized --overwrite
+kubectl --context kind-spark-poc get nodes -L tier
+kubectl --context kind-spark-poc -n spark-jobs get pods -o wide
+```
+
+Clusters novos recebem as labels pela configuração kind. Sem a label no nó,
+os pods que a selecionam permanecerão pendentes.
+
+As DAGs `spark_pi_kind`, `spark_pi_ttl_kind`, `spark_contagem_kind` e
+`spark_exporter_s3_kind` são disparadas manualmente no Airflow. Para o exporter,
+configure o dataset, a imagem e o Secret AWS conforme a seção anterior antes de
+disparar a DAG. Com o cluster kind criado, prepare o kubeconfig para o container do
 MWAA local e inicie ou recrie o runner a partir da raiz dele:
 
 ```sh
@@ -170,3 +236,46 @@ O job de contagem usa alocação dinâmica: começa com um executor e pode solic
 até quatro, conforme a demanda e os recursos disponíveis no cluster. O shuffle
 tracking ajuda a preservar executores com dados de shuffle ainda necessários.
 Jobs curtos podem terminar antes de ser possível observar a expansão ou redução.
+
+## Observar a Spark UI e a retenção
+
+Depois de alterar `contagem.py`, reconstrua e publique a imagem de contagem
+com `task images:build` e `task images:push`, conforme a seção de imagens.
+O código é incluído na imagem durante o build. Dispare a DAG
+`spark_contagem_kind` ou crie a aplicação diretamente:
+
+```sh
+kubectl --context kind-spark-poc create -f spark-jobs/contagem.yaml
+kubectl --context kind-spark-poc -n spark-jobs get pods -w
+```
+
+Em outro terminal, enquanto o pod do driver estiver em execução, substitua o
+nome abaixo pelo nome exibido no comando anterior:
+
+```sh
+kubectl --context kind-spark-poc -n spark-jobs port-forward pod/<nome-do-driver> 4040:4040
+```
+
+Acesse <http://localhost:4040>. Após o processamento, o driver espera 120
+segundos antes de encerrar, dando tempo para explorar a UI. A espera mantém o
+driver ativo, mas não garante que a expansão ou a redução dos executors seja
+visível. Após o término, consulte a execução no History Server seguindo a
+seção de histórico acima. Para outro cluster, substitua `kind-spark-poc` pelo
+contexto correspondente. A aplicação de contagem tem nome fixo: remova uma
+execução anterior antes de criá-la novamente diretamente com `kubectl create`.
+
+Para comparar a retenção, crie as duas variantes do Pi e acompanhe seus estados:
+
+```sh
+kubectl --context kind-spark-poc create -f spark-jobs/pi.yaml
+kubectl --context kind-spark-poc create -f spark-jobs/pi-ttl.yaml
+kubectl --context kind-spark-poc -n spark-jobs get sparkapplications,pods -w
+```
+
+A variante `spark-pi-ttl-` define `timeToLiveSeconds: 60`: depois de terminar,
+o Operator remove a SparkApplication após aproximadamente 60 segundos, sujeito
+ao intervalo de reconciliação. A variante `spark-pi-` não define TTL e não é
+removida por esse mecanismo. Observe também os pods: o Spark normalmente remove
+os executors ao término; o driver concluído pode permanecer até uma limpeza.
+O TTL da aplicação não apaga os event logs, que têm ciclo de vida próprio.
+Interrompa o acompanhamento com Ctrl+C.

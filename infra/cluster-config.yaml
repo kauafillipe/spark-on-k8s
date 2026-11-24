@@ -3,10 +3,18 @@ apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
 - role: control-plane
 - role: worker
+  labels:
+    tier: standard
   extraMounts:
   - hostPath: /tmp/spark-poc-event-logs
     containerPath: /spark-event-logs
+  - hostPath: /tmp/spark-poc-output
+    containerPath: /spark-output
 - role: worker
+  labels:
+    tier: optimized
   extraMounts:
   - hostPath: /tmp/spark-poc-event-logs
     containerPath: /spark-event-logs
+  - hostPath: /tmp/spark-poc-output
+    containerPath: /spark-output

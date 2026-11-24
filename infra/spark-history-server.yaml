@@ -13,9 +13,11 @@ spec:
       labels:
         app: spark-history-server
     spec:
+      imagePullSecrets:
+        - name: dockerhub-credentials
       containers:
         - name: history-server
-          image: apache/spark:3.5.3-python3
+          image: "docker.io/kaufirs/spark-poc:base-3.5.3"
           command: ["/opt/spark/bin/spark-class"]
           args: ["org.apache.spark.deploy.history.HistoryServer"]
           env:

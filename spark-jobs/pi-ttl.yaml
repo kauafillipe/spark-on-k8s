@@ -1,0 +1,59 @@
+apiVersion: "sparkoperator.k8s.io/v1beta2"
+kind: SparkApplication
+metadata:
+  generateName: spark-pi-ttl-
+  namespace: spark-jobs
+  labels:
+    workload_name: spark-pi-ttl
+    workload_type: spark-application
+    domain: foundations
+    product: staging
+    environment: dev
+spec:
+  nodeSelector:
+    tier: optimized
+  timeToLiveSeconds: 60
+  type: Python
+  mode: cluster
+  image: "docker.io/kaufirs/spark-poc:pi-3.5.3"
+  imagePullPolicy: Always
+  imagePullSecrets:
+    - dockerhub-credentials
+  mainApplicationFile: "local:///opt/spark/examples/src/main/python/pi.py"
+  sparkVersion: "3.5.3"
+  sparkConf:
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: "file:///spark-event-logs"
+  volumes:
+    - name: event-logs
+      hostPath:
+        path: /spark-event-logs
+        type: Directory
+  restartPolicy:
+    type: Never
+  driver:
+    cores: 1
+    coreLimit: "1200m"
+    memory: "512m"
+    labels:
+      version: 3.5.3
+      workload_name: spark-pi-ttl
+      workload_type: spark-application
+      domain: foundations
+      product: staging
+      environment: dev
+    serviceAccount: spark-operator-spark
+    volumeMounts:
+      - name: event-logs
+        mountPath: /spark-event-logs
+  executor:
+    instances: 1
+    cores: 1
+    memory: "512m"
+    labels:
+      version: 3.5.3
+      workload_name: spark-pi-ttl
+      workload_type: spark-application
+      domain: foundations
+      product: staging
+      environment: dev

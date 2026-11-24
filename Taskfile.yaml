@@ -7,33 +7,50 @@ vars:
   KUBE_CONTEXT: 'kind-{{.CLUSTER_NAME}}'
   DOCKERHUB_USER: '{{.DOCKERHUB_USER | default "kaufirs"}}'
   SPARK_IMAGE_REPO: 'docker.io/{{.DOCKERHUB_USER}}/spark-poc'
+  CA_CERT: '{{.CA_CERT | default (env "CA_CERT") | default "/Users/kauafilipe/Downloads/Gateway CA - Cloudflare Managed G7 ea79cef4d494ee7577f45daa99ec5642.cer.cer"}}'
 
 env:
   PATH: '{{if eq OS "windows"}}{{env "PATH"}};{{env "LOCALAPPDATA"}}\Microsoft\WinGet\Links{{else}}{{env "PATH"}}{{end}}'
 
 tasks:
-  default:
-    desc: Lista os comandos disponíveis
-    cmds:
-      - task --list
-
   images:build:
-    desc: Constrói localmente as imagens base, pi e contagem
+    desc: Constrói localmente as imagens base, pi, contagem e exporter S3
     cmds:
       - echo '[images] Construindo imagens...'
       - docker build -f images/Dockerfile.base -t '{{.SPARK_IMAGE_REPO}}:base-3.5.3' .
+      - docker build -f images/Dockerfile.base-exporter -t '{{.SPARK_IMAGE_REPO}}:base-exporter-3.5.5' .
       - docker build -f images/Dockerfile.pi --build-arg 'BASE_IMAGE={{.SPARK_IMAGE_REPO}}:base-3.5.3' -t '{{.SPARK_IMAGE_REPO}}:pi-3.5.3' .
       - docker build -f images/Dockerfile.contagem --build-arg 'BASE_IMAGE={{.SPARK_IMAGE_REPO}}:base-3.5.3' -t '{{.SPARK_IMAGE_REPO}}:contagem-3.5.3' .
+      - 'if [ -f "{{.CA_CERT}}" ]; then docker build --secret "id=corporate_ca,src={{.CA_CERT}}" -f images/Dockerfile.exporter-s3 --build-arg "BASE_IMAGE={{.SPARK_IMAGE_REPO}}:base-exporter-3.5.5" -t "{{.SPARK_IMAGE_REPO}}:exporter-s3-3.5.5" .; else docker build -f images/Dockerfile.exporter-s3 --build-arg "BASE_IMAGE={{.SPARK_IMAGE_REPO}}:base-exporter-3.5.5" -t "{{.SPARK_IMAGE_REPO}}:exporter-s3-3.5.5" .; fi'
 
   images:push:
-    desc: Publica as três imagens no Docker Hub
+    desc: Publica as imagens no Docker Hub
     cmds:
       - echo '[images] Publicando imagens...'
       - docker push '{{.SPARK_IMAGE_REPO}}:base-3.5.3'
+      - docker push '{{.SPARK_IMAGE_REPO}}:base-exporter-3.5.5'
       - docker push '{{.SPARK_IMAGE_REPO}}:pi-3.5.3'
       - docker push '{{.SPARK_IMAGE_REPO}}:contagem-3.5.3'
+      - docker push '{{.SPARK_IMAGE_REPO}}:exporter-s3-3.5.5'
 
-  dockerhub:secret:
+  secret:aws:
+    desc: Cria ou atualiza o Secret com credenciais temporárias do perfil AWS
+    vars:
+      PROFILE: '{{env "AWS_PROFILE" | default "flash-data"}}'
+      CREDENTIALS:
+        sh: aws configure export-credentials --profile '{{.PROFILE}}' --format process
+      ACCESS_KEY: '{{(fromJson .CREDENTIALS).AccessKeyId | b64enc}}'
+      SECRET_KEY: '{{(fromJson .CREDENTIALS).SecretAccessKey | b64enc}}'
+      SESSION_TOKEN: '{{(fromJson .CREDENTIALS).SessionToken | default "" | b64enc}}'
+    preconditions:
+      - sh: 'test -n "{{.ACCESS_KEY}}" && test -n "{{.SECRET_KEY}}" && test -n "{{.SESSION_TOKEN}}"'
+        msg: '[erro] Faça login no perfil AWS antes de criar o Secret.'
+    cmds:
+      - echo '[secret] Aplicando credenciais AWS temporárias...'
+      - >-
+        printf '%s\n' 'apiVersion: v1' 'kind: Secret' 'metadata:' '  name: exporter-s3-aws' '  namespace: spark-jobs' 'type: Opaque' 'data:' '  AWS_ACCESS_KEY_ID: "{{.ACCESS_KEY}}"' '  AWS_SECRET_ACCESS_KEY: "{{.SECRET_KEY}}"' '  AWS_SESSION_TOKEN: "{{.SESSION_TOKEN}}"' | kubectl --context '{{.KUBE_CONTEXT}}' apply -f -
+
+  secret:dockerhub:
     desc: Cria ou atualiza o Secret de acesso ao Docker Hub
     vars:
       AUTH: '{{printf "%s:%s" .DOCKERHUB_USER (env "DOCKERHUB_TOKEN") | b64enc}}'
@@ -82,6 +99,34 @@ tasks:
     cmds:
       - task: check
       - task: cluster:create
+      - task: cluster:ca
+
+  cluster:ca:
+    internal: true
+    vars:
+      NODES:
+        sh: kubectl --context '{{.KUBE_CONTEXT}}' get nodes -l '!node-role.kubernetes.io/control-plane' -o 'jsonpath={.items[*].metadata.name}'
+    status:
+      - 'test ! -f "{{.CA_CERT}}"'
+    cmds:
+      - 'test -n "{{.NODES}}" || { echo "[erro] Nenhum nó worker encontrado no cluster." >&2; exit 1; }'
+      - for: {var: NODES}
+        task: cluster:ca-node
+        vars: {NODE: '{{.ITEM}}'}
+
+  cluster:ca-node:
+    internal: true
+    cmds:
+      - echo '[cluster] Instalando CA no nó {{.NODE}}...'
+      - docker cp '{{.CA_CERT}}' '{{.NODE}}:/usr/local/share/ca-certificates/spark-poc-ca.crt'
+      - docker exec '{{.NODE}}' update-ca-certificates
+      - docker exec '{{.NODE}}' systemctl restart containerd
+
+  cluster:delete:
+    desc: Exclui o cluster kind e todos os recursos nele
+    cmds:
+      - echo '[cluster] Excluindo cluster {{.CLUSTER_NAME}} e seus recursos...'
+      - kind delete cluster --name '{{.CLUSTER_NAME}}'
 
   cluster:create:
     internal: true
@@ -92,9 +137,9 @@ tasks:
     cmds:
       - echo '[cluster] Criando cluster {{.CLUSTER_NAME}}...'
       - >-
-        {{if eq OS "windows"}}powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "spark-poc-event-logs") | Out-Null'{{else}}mkdir -p /tmp/spark-poc-event-logs{{end}}
+        {{if eq OS "windows"}}powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "spark-poc-event-logs"), (Join-Path $env:TEMP "spark-poc-output") | Out-Null'{{else}}mkdir -p /tmp/spark-poc-event-logs /tmp/spark-poc-output{{end}}
       - >-
-        {{if eq OS "windows"}}powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; (Get-Content -Raw "infra/cluster-config.yaml").Replace("/tmp/spark-poc-event-logs", (($env:TEMP + "/spark-poc-event-logs") -replace "\\", "/")) | Set-Content -Encoding utf8 (Join-Path $env:TEMP "spark-poc-kind-config.yaml")'{{else}}chmod 777 /tmp/spark-poc-event-logs{{end}}
+        {{if eq OS "windows"}}powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"; (Get-Content -Raw "infra/cluster-config.yaml").Replace("/tmp/spark-poc-event-logs", (($env:TEMP + "/spark-poc-event-logs") -replace "\\", "/")).Replace("/tmp/spark-poc-output", (($env:TEMP + "/spark-poc-output") -replace "\\", "/")) | Set-Content -Encoding utf8 (Join-Path $env:TEMP "spark-poc-kind-config.yaml")'{{else}}chmod 777 /tmp/spark-poc-event-logs /tmp/spark-poc-output{{end}}
       - kind create cluster --name '{{.CLUSTER_NAME}}' --config '{{.CONFIG}}'
 
   operator:
@@ -107,7 +152,7 @@ tasks:
       - helm repo add spark-operator https://kubeflow.github.io/spark-operator --force-update
       - helm repo update spark-operator
       - echo '[operator] Instalando chart 2.6.0...'
-      - helm upgrade --install spark-operator spark-operator/spark-operator --version 2.6.0 --kube-context '{{.KUBE_CONTEXT}}' --namespace spark-operator --create-namespace --set 'spark.jobNamespaces[0]=spark-jobs' --wait --timeout 5m
+      - helm upgrade --install spark-operator spark-operator/spark-operator --version 2.6.0 --kube-context '{{.KUBE_CONTEXT}}' --namespace spark-operator --create-namespace --values infra/spark-operator-values.yaml --wait --timeout 5m
       - echo '[operator] Aguardando controller e webhook...'
       - kubectl --context '{{.KUBE_CONTEXT}}' -n spark-operator rollout status deployment/spark-operator-controller --timeout=5m
       - kubectl --context '{{.KUBE_CONTEXT}}' -n spark-operator rollout status deployment/spark-operator-webhook --timeout=5m
@@ -131,32 +176,33 @@ tasks:
     cmds:
       - 'docker exec "{{.NODE}}" sh -c ''grep -q " /spark-event-logs " /proc/mounts'' || { echo "[erro] O nó {{.NODE}} não possui o diretório de event logs. Recrie o cluster com a configuração atual." >&2; exit 1; }'
 
-  history-ui:
-    desc: Disponibiliza o History Server em localhost:18080
-    cmds:
-      - echo '[history] Acesse http://localhost:18080 (Ctrl+C para sair).'
-      - kubectl --context '{{.KUBE_CONTEXT}}' -n spark-jobs port-forward service/spark-history-server 18080:18080
-
-  job:
+  job:pi:
     desc: Envia o job Spark Pi
     cmds:
       - echo '[job] Aplicando SparkApplication...'
-      - kubectl --context '{{.KUBE_CONTEXT}}' apply -f spark-jobs/pi.yaml
+      - kubectl --context '{{.KUBE_CONTEXT}}' create -f spark-jobs/pi.yaml
+      - task: status
+
+  job:exporter-s3:
+    desc: Envia o job exporter S3
+    cmds:
+      - kubectl --context '{{.KUBE_CONTEXT}}' create -f spark-jobs/exporter-s3.yaml
+      - task: status
+
+  job:pi-ttl:
+    desc: Envia o job Spark Pi
+    cmds:
+      - echo '[job] Aplicando SparkApplication...'
+      - kubectl --context '{{.KUBE_CONTEXT}}' create -f spark-jobs/pi-ttl.yaml
       - task: status
 
   status:
-    desc: Mostra o estado do operador e dos jobs
+    internal: true
     cmds:
       - echo '[status] Operador'
       - kubectl --context '{{.KUBE_CONTEXT}}' -n spark-operator get deployments,pods
       - echo '[status] SparkApplications e pods'
       - kubectl --context '{{.KUBE_CONTEXT}}' -n spark-jobs get sparkapplications,pods
-
-  logs:
-    desc: Acompanha os logs do controller
-    cmds:
-      - echo '[logs] Acompanhando o controller (Ctrl+C para sair)...'
-      - kubectl --context '{{.KUBE_CONTEXT}}' -n spark-operator logs -f deployment/spark-operator-controller
 
   up:
     desc: Cria o cluster, instala o operador e envia o exemplo

@@ -1,0 +1,69 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: exporter-s3-local
+  namespace: spark-jobs
+  labels:
+    workload_name: exporter-s3-local
+    workload_type: spark-application
+    domain: foundations
+    product: staging
+    environment: dev
+spec:
+  nodeSelector:
+    tier: standard
+  type: Python
+  mode: cluster
+  image: "docker.io/kaufirs/spark-poc:exporter-s3-3.5.5"
+  imagePullPolicy: Always
+  imagePullSecrets:
+    - dockerhub-credentials
+  mainApplicationFile: local:///opt/spark/jobs/exporter-s3/job.py
+  sparkVersion: "3.5.5"
+  arguments: ["--bucket", "dataflash-gold", "--domain", "foundations", "--data_product", "staging", "--dataset", "study_spark_k8s_exporter"]
+  sparkConf:
+    spark.sql.extensions: io.delta.sql.DeltaSparkSessionExtension
+    spark.sql.catalog.spark_catalog: org.apache.spark.sql.delta.catalog.DeltaCatalog
+    spark.hadoop.fs.s3a.aws.credentials.provider: com.amazonaws.auth.EnvironmentVariableCredentialsProvider
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: file:///spark-event-logs
+  volumes:
+    - name: output
+      hostPath: {path: /spark-output, type: Directory}
+    - name: event-logs
+      hostPath: {path: /spark-event-logs, type: Directory}
+  restartPolicy:
+    type: Never
+  driver:
+    labels:
+      workload_name: exporter-s3-local
+      workload_type: spark-application
+      domain: foundations
+      product: staging
+      environment: dev
+    cores: 1
+    memory: 1g
+    serviceAccount: spark-operator-spark
+    env:
+      - {name: AWS_DEFAULT_REGION, value: us-east-1}
+    envFrom:
+      - secretRef: {name: exporter-s3-aws}
+    volumeMounts:
+      - {name: output, mountPath: /spark-output}
+      - {name: event-logs, mountPath: /spark-event-logs}
+  executor:
+    labels:
+      workload_name: exporter-s3-local
+      workload_type: spark-application
+      domain: foundations
+      product: staging
+      environment: dev
+    instances: 1
+    cores: 1
+    memory: 1g
+    env:
+      - {name: AWS_DEFAULT_REGION, value: us-east-1}
+    envFrom:
+      - secretRef: {name: exporter-s3-aws}
+    volumeMounts:
+      - {name: output, mountPath: /spark-output}
