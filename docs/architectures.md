@@ -37,3 +37,7 @@
 
 * Driver e Executor são Pods;
 * Kubernetes é o Cluster Manager.
+
+# Diagrama da Demo
+
+![spark-demo-diagram.png](../assets/spark-demo-diagram.png)
